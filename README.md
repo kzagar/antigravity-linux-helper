@@ -106,6 +106,28 @@ antigravity-ide --no-notifications
 export ANTIGRAVITY_NOTIFICATIONS=no
 ```
 
+**Desktop launchers (start menu icons):**
+
+The `.desktop` files generated in `~/.local/share/applications/` always include `--no-notifications` in their `Exec=` line, so launching either application from the desktop or application menu will have notifications disabled by default.
+
+To re-enable notifications for a desktop launcher, edit the corresponding file and remove `--no-notifications` from the `Exec=` line:
+
+```
+~/.local/share/applications/antigravity.desktop
+~/.local/share/applications/antigravity-ide.desktop
+```
+
+Change the line from:
+```
+Exec=/home/<user>/.local/bin/antigravity --no-notifications %U
+```
+to:
+```
+Exec=/home/<user>/.local/bin/antigravity %U
+```
+
+> **Note:** The `.desktop` files are regenerated on every update check. You will need to re-apply this change after each update.
+
 ---
 
 ## Internals & File Paths
