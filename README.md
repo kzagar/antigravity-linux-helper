@@ -89,6 +89,23 @@ antigravity-ide --update
 ```
 *(The `--update` flag updates the respective application in the background and exits immediately without launching the GUI)*
 
+### Disable Notifications (ChromeOS / Crostini)
+
+On **ChromeOS** there is no system-level setting to silence Antigravity's desktop notifications. This is a problem in agent workflows because the notification banners can appear on top of and cover the interaction buttons.
+
+The `--no-notifications` flag (or the `ANTIGRAVITY_NOTIFICATIONS=no` environment variable) works around this by setting `DBUS_SESSION_BUS_ADDRESS=/dev/null` before the application starts. This prevents the app from connecting to D-Bus, which suppresses all desktop notifications without affecting any other functionality.
+
+**One-time (current session only):**
+```bash
+antigravity --no-notifications
+antigravity-ide --no-notifications
+```
+
+**Permanent (via environment variable — already added to `~/.bashrc` by the installer):**
+```bash
+export ANTIGRAVITY_NOTIFICATIONS=no
+```
+
 ---
 
 ## Internals & File Paths
