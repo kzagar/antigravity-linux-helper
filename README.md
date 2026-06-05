@@ -93,7 +93,7 @@ antigravity-ide --update
 
 On **ChromeOS** there is no system-level setting to silence Antigravity's desktop notifications. This is a problem in agent workflows because the notification banners can appear on top of and cover the interaction buttons.
 
-The `--no-notifications` flag (or the `ANTIGRAVITY_NOTIFICATIONS=no` environment variable) works around this by setting `DBUS_SESSION_BUS_ADDRESS=/dev/null` before the application starts. This prevents the app from connecting to D-Bus, which suppresses all desktop notifications without affecting any other functionality.
+The `--no-notifications` flag (or the `ANTIGRAVITY_NOTIFICATIONS=no` environment variable) works around this by wrapping the application launch in `dbus-run-session`, which gives it an isolated, transient D-Bus session so notifications never reach the real desktop session bus. This suppresses all desktop notifications without affecting any other functionality.
 
 **One-time (current session only):**
 ```bash

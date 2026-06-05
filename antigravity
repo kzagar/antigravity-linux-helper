@@ -647,9 +647,10 @@ def main():
     force_update = "--update" in sys.argv
     # On ChromeOS (Crostini) there is no system-level way to silence
     # Antigravity's desktop notifications, and they can cover the interaction
-    # buttons in agent workflows.  Setting DBUS_SESSION_BUS_ADDRESS to
-    # /dev/null before exec makes the app unable to reach D-Bus, suppressing
-    # all notifications without affecting core functionality.
+    # buttons in agent workflows.  Wrapping the exec with dbus-run-session
+    # gives the app an isolated, transient D-Bus session so notifications
+    # never reach the real desktop session bus, without affecting core
+    # functionality.
     no_notifications = (
         "--no-notifications" in sys.argv
         or os.environ.get("ANTIGRAVITY_NOTIFICATIONS", "").lower() == "no"
@@ -661,9 +662,6 @@ def main():
     if force_update:
         print("Update operation completed.")
         sys.exit(0)
-
-    if no_notifications:
-        os.environ["DBUS_SESSION_BUS_ADDRESS"] = "/dev/null"
 
     user_home = get_user_home()
     app_dir = os.path.join(user_home, ".local", "opt", app_name)
@@ -680,11 +678,17 @@ def main():
         )
         sys.exit(1)
 
-    exec_args = [resolved_bin] + [
+    filtered_args = [
         a for a in sys.argv[1:] if a not in ("--update", "--no-notifications")
     ]
+    if no_notifications and shutil.which("dbus-run-session"):
+        exec_bin = shutil.which("dbus-run-session")
+        exec_args = [exec_bin, "--", resolved_bin] + filtered_args
+    else:
+        exec_bin = resolved_bin
+        exec_args = [resolved_bin] + filtered_args
     try:
-        os.execv(resolved_bin, exec_args)
+        os.execv(exec_bin, exec_args)
     except OSError as exc:
         print(f"Error: Failed to execute {resolved_bin}: {exc}", file=sys.stderr)
         sys.exit(1)
