@@ -1,0 +1,491 @@
+#!/usr/bin/env python3
+import sys
+import os
+import shutil
+import urllib.request
+import json
+import gzip
+import datetime
+import tarfile
+import fnmatch
+import platform
+import re
+
+# Constants
+DOWNLOAD_PAGE_URL = "https://antigravity.google/download"
+BASE_URL = "https://antigravity.google"
+BRAND_LOGO_URL = "https://antigravity.google/assets/image/brand/antigravity-icon__full-color.png"
+
+HUB_DOWNLOAD_TEMPLATE = "https://storage.googleapis.com/antigravity-public/antigravity-hub/{version}-{execution_id}/{platform}/Antigravity.tar.gz"
+IDE_DOWNLOAD_TEMPLATE_NEW = "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/{version}-{execution_id}/{platform}/Antigravity%20IDE.tar.gz"
+IDE_DOWNLOAD_TEMPLATE_OLD = "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/{version}-{execution_id}/{platform}/Antigravity.tar.gz"
+
+# Resolve the home directory of the original user (handles sudo)
+def get_user_home():
+    sudo_user = os.environ.get('SUDO_USER')
+    if sudo_user:
+        import pwd
+        try:
+            return pwd.getpwnam(sudo_user).pw_dir
+        except KeyError:
+            pass
+    return os.path.expanduser('~')
+
+# Resolve UID/GID of the original user (handles sudo)
+def get_user_uid_gid():
+    sudo_uid = os.environ.get('SUDO_UID')
+    sudo_gid = os.environ.get('SUDO_GID')
+    if sudo_uid and sudo_gid:
+        return int(sudo_uid), int(sudo_gid)
+    return os.getuid(), os.getgid()
+
+# Change ownership of a path recursively to the original user
+def chown_to_user(path):
+    uid, gid = get_user_uid_gid()
+    if os.getuid() == 0:  # Only attempt if running as root
+        try:
+            if os.path.isdir(path):
+                os.chown(path, uid, gid)
+                for root, dirs, files in os.walk(path):
+                    for d in dirs:
+                        os.chown(os.path.join(root, d), uid, gid)
+                    for f in files:
+                        os.chown(os.path.join(root, f), uid, gid)
+            else:
+                os.chown(path, uid, gid)
+        except OSError as e:
+            print(f"Warning: Failed to chown {path} to user: {e}", file=sys.stderr)
+
+# Recursively find a file matching a pattern
+def find_file_recursive(dir_path, pattern, is_executable=False):
+    for root, _, files in os.walk(dir_path):
+        for name in files:
+            if fnmatch.fnmatch(name, pattern):
+                full_path = os.path.join(root, name)
+                if not is_executable or os.access(full_path, os.X_OK):
+                    return full_path
+    return None
+
+# Find the best available icon in the package directory
+def find_icon_recursive(dir_path, app_name):
+    # Prefer png/svg files with name containing code, logo, icon or app_name
+    candidates = []
+    for root, _, files in os.walk(dir_path):
+        for name in files:
+            if name.lower().endswith(('.png', '.svg')):
+                full_path = os.path.join(root, name)
+                lower_name = name.lower()
+                # Score candidate
+                score = 0
+                if 'code' in lower_name:
+                    score += 10
+                if 'logo' in lower_name:
+                    score += 8
+                if 'icon' in lower_name:
+                    score += 6
+                if app_name in lower_name:
+                    score += 5
+                candidates.append((score, full_path))
+    if candidates:
+        # Return the highest scored candidate
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+    return None
+
+# Perform a HTTP request with gzip decompression
+def fetch_url(url, method='GET', headers=None, timeout=10):
+    if headers is None:
+        headers = {}
+    headers.setdefault('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36')
+    headers.setdefault('Accept-Encoding', 'gzip, deflate')
+    
+    req = urllib.request.Request(url, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        info = response.info()
+        encoding = info.get('Content-Encoding')
+        data = response.read()
+        if encoding == 'gzip':
+            data = gzip.decompress(data)
+        return data, info
+
+# Parse HTML and JS to find the latest release URL and version
+def discover_release_info(app_name):
+    # 1. Fetch the download webpage
+    try:
+        html_data, _ = fetch_url(DOWNLOAD_PAGE_URL)
+        html = html_data.decode('utf-8', errors='ignore')
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch download page: {e}")
+
+    # 2. Extract script tags src matching main-*.js
+    js_files = re.findall(r'src="([^"]+/main-[^"]+\.js|main-[^"]+\.js)"', html)
+    if not js_files:
+        raise RuntimeError("Could not find main script bundle on download page HTML")
+    
+    js_url = js_files[0]
+    if not js_url.startswith("http"):
+        js_url = BASE_URL + "/" + js_url.lstrip('/')
+
+    # 3. Fetch the main JS bundle
+    try:
+        js_data, _ = fetch_url(js_url)
+        js_content = js_data.decode('utf-8', errors='ignore')
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch script bundle: {e}")
+
+    # 4. Search for the releases API URL in the JS
+    api_pattern = (
+        r'(https://antigravity-hub-auto-updater[^"\']+/releases)'
+        if app_name == "antigravity"
+        else r'(https://antigravity-ide-auto-updater[^"\']+/releases)'
+    )
+    match = re.search(api_pattern, js_content)
+    if not match:
+        raise RuntimeError(f"Could not locate auto-updater API endpoint in JS bundle for {app_name}")
+    
+    api_url = match.group(1)
+
+    # 5. Fetch the release list JSON
+    try:
+        api_data, _ = fetch_url(api_url)
+        releases = json.loads(api_data.decode('utf-8'))
+    except Exception as e:
+        raise RuntimeError(f"Failed to query releases API: {e}")
+
+    if not releases or not isinstance(releases, list):
+        raise RuntimeError(f"Invalid releases response from {api_url}")
+
+    latest = releases[0]
+    version = latest['version']
+    execution_id = latest['execution_id']
+
+    # 6. Determine platform based on architecture
+    arch = platform.machine()
+    if arch == 'x86_64':
+        r_platform = 'linux-x64'
+    elif arch in ('aarch64', 'arm64'):
+        r_platform = 'linux-arm'
+    else:
+        r_platform = 'linux-x64'
+
+    # 7. Construct download URL
+    if app_name == "antigravity":
+        download_url = HUB_DOWNLOAD_TEMPLATE.format(version=version, execution_id=execution_id, platform=r_platform)
+    else:
+        parts = version.split('.')
+        is_new = parts and parts[0].isdigit() and int(parts[0]) >= 2
+        template = IDE_DOWNLOAD_TEMPLATE_NEW if is_new else IDE_DOWNLOAD_TEMPLATE_OLD
+        download_url = template.format(version=version, execution_id=execution_id, platform=r_platform)
+
+    return version, execution_id, download_url
+
+# Handle self-installation to ~/.local/bin
+def self_install():
+    user_home = get_user_home()
+    user_bin = os.path.join(user_home, ".local", "bin")
+    target_script = os.path.join(user_bin, "antigravity")
+    target_symlink = os.path.join(user_bin, "antigravity-ide")
+
+    # Path to the currently executing script
+    curr_script_path = os.path.abspath(sys.argv[0])
+
+    # Ensure ~/.local/bin exists
+    if not os.path.exists(user_bin):
+        os.makedirs(user_bin, exist_ok=True)
+        chown_to_user(user_bin)
+
+    # Copy the script to ~/.local/bin/antigravity if it's not already there or different
+    should_copy = True
+    if os.path.exists(target_script):
+        try:
+            with open(curr_script_path, 'rb') as f1, open(target_script, 'rb') as f2:
+                if f1.read() == f2.read():
+                    should_copy = False
+        except Exception:
+            pass
+
+    if should_copy:
+        try:
+            shutil.copy2(curr_script_path, target_script)
+            os.chmod(target_script, 0o755)
+            chown_to_user(target_script)
+        except OSError as e:
+            print(f"Warning: Could not self-install script to {target_script}: {e}", file=sys.stderr)
+
+    # Create the ~/.local/bin/antigravity-ide symlink if missing
+    if not os.path.exists(target_symlink):
+        try:
+            # Relative symlink is cleaner
+            os.symlink("antigravity", target_symlink)
+            chown_to_user(target_symlink)
+        except OSError as e:
+            print(f"Warning: Could not create symlink {target_symlink}: {e}", file=sys.stderr)
+
+# Check and update the application
+def check_and_update(app_name, force=False):
+    user_home = get_user_home()
+    config_dir = os.path.join(user_home, ".config", "antigravity")
+    last_check_file = os.path.join(config_dir, f"last_check_{app_name}")
+    
+    # Check if 1 hour has passed
+    now = datetime.datetime.now()
+    should_check = force
+    if not should_check:
+        if not os.path.exists(last_check_file):
+            should_check = True
+        else:
+            try:
+                with open(last_check_file, 'r') as f:
+                    timestamp = float(f.read().strip())
+                last_check_time = datetime.datetime.fromtimestamp(timestamp)
+                if (now - last_check_time).total_seconds() >= 3600:
+                    should_check = True
+            except Exception:
+                should_check = True
+
+    opt_dir = os.path.join(user_home, ".local", "opt")
+    app_dir = os.path.join(opt_dir, app_name)
+    version_file = os.path.join(app_dir, ".version.json")
+    
+    # Load installed version metadata
+    installed_metadata = {}
+    if os.path.exists(version_file):
+        try:
+            with open(version_file, 'r') as f:
+                installed_metadata = json.load(f)
+        except Exception:
+            pass
+
+    if not should_check:
+        # Skip network check, verify if binary is locally present
+        if os.path.exists(app_dir):
+            return
+        # If directory is missing, force a check/download
+        print(f"Installation directory {app_dir} is missing. Forcing installation...")
+
+    print(f"Checking for updates for {app_name}...")
+    
+    # Save the check timestamp
+    os.makedirs(config_dir, exist_ok=True)
+    chown_to_user(config_dir)
+    try:
+        with open(last_check_file, 'w') as f:
+            f.write(str(now.timestamp()))
+        chown_to_user(last_check_file)
+    except Exception:
+        pass
+
+    try:
+        version, execution_id, download_url = discover_release_info(app_name)
+    except Exception as e:
+        print(f"Warning: Failed to discover release info: {e}. Proceeding with installed version if available.", file=sys.stderr)
+        return
+
+    # Check headers (HEAD request) to get Last-Modified
+    try:
+        _, info = fetch_url(download_url, method='HEAD')
+        remote_last_modified = info.get('Last-Modified')
+    except Exception as e:
+        print(f"Warning: Failed to verify release headers: {e}. Proceeding with installed version if available.", file=sys.stderr)
+        return
+
+    # Determine if update is needed
+    is_installed = os.path.exists(app_dir)
+    installed_version = installed_metadata.get('version')
+    installed_last_modified = installed_metadata.get('last_modified')
+    
+    needs_update = (
+        not is_installed
+        or installed_version != version
+        or installed_last_modified != remote_last_modified
+    )
+
+    if not needs_update:
+        print(f"{app_name} is up-to-date (Version {version}).")
+        # Regenerate desktop file in case it was missing
+        write_desktop_entry(app_name, app_dir)
+        return
+
+    print(f"New version available: {version} (Released: {remote_last_modified})")
+    
+    # Check write permission to opt dir
+    if not os.path.exists(opt_dir):
+        try:
+            os.makedirs(opt_dir, exist_ok=True)
+            chown_to_user(opt_dir)
+        except OSError as e:
+            print(f"Error: Cannot create directory {opt_dir}: {e}. Skipping update.", file=sys.stderr)
+            return
+
+    if not os.access(opt_dir, os.W_OK):
+        print(f"Error: No write permission to {opt_dir}. Skipping update.", file=sys.stderr)
+        return
+
+    # Atomic Update Dance
+    new_dir = app_dir + ".new"
+    old_dir = app_dir + ".old"
+    
+    # Clean stale .new folder
+    if os.path.exists(new_dir):
+        shutil.rmtree(new_dir)
+        
+    os.makedirs(new_dir, exist_ok=True)
+    chown_to_user(new_dir)
+
+    temp_archive = os.path.join(opt_dir, f"{app_name}_temp.tar.gz")
+    print(f"Downloading {app_name} archive...")
+    try:
+        # Download file
+        req = urllib.request.Request(download_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response, open(temp_archive, 'wb') as out_file:
+            shutil.copyfileobj(response, out_file)
+            
+        print("Extracting archive...")
+        # Unpack, stripping top-level directory
+        with tarfile.open(temp_archive, "r:gz") as tar:
+            members = []
+            for member in tar.getmembers():
+                parts = member.name.split('/')
+                if len(parts) > 1:
+                    member.name = '/'.join(parts[1:])
+                    members.append(member)
+            tar.extractall(path=new_dir, members=members)
+            
+        # Verify extraction by locating executable
+        resolved_bin = find_file_recursive(new_dir, app_name, is_executable=True)
+        if not resolved_bin:
+            raise RuntimeError(f"Could not locate executable binary '{app_name}' in extracted files")
+            
+        # Save version metadata
+        meta = {
+            "version": version,
+            "execution_id": execution_id,
+            "last_modified": remote_last_modified
+        }
+        with open(os.path.join(new_dir, ".version.json"), 'w') as f:
+            json.dump(meta, f)
+            
+        # If hub and no local icon was unpacked, download the icon from brand assets
+        local_icon = find_icon_recursive(new_dir, app_name)
+        if not local_icon and app_name == "antigravity":
+            try:
+                logo_url = BRAND_LOGO_URL
+                logo_data, _ = fetch_url(logo_url)
+                with open(os.path.join(new_dir, "logo.png"), 'wb') as logo_f:
+                    logo_f.write(logo_data)
+            except Exception as e:
+                print(f"Warning: Failed to fetch online application logo: {e}", file=sys.stderr)
+        
+        # Ensure all unpacked files are owned by the original user
+        chown_to_user(new_dir)
+
+        # Atomic directory swap
+        if os.path.exists(old_dir):
+            shutil.rmtree(old_dir)
+        if os.path.exists(app_dir):
+            os.rename(app_dir, old_dir)
+        os.rename(new_dir, app_dir)
+        
+        if os.path.exists(old_dir):
+            shutil.rmtree(old_dir)
+
+        print(f"Successfully updated {app_name} to version {version}!")
+        
+        # Write .desktop entry
+        write_desktop_entry(app_name, app_dir)
+
+    except Exception as e:
+        print(f"Error during update of {app_name}: {e}. Rollback initiated.", file=sys.stderr)
+        if os.path.exists(new_dir):
+            shutil.rmtree(new_dir)
+    finally:
+        if os.path.exists(temp_archive):
+            os.remove(temp_archive)
+
+# Write the .desktop environment entry
+def write_desktop_entry(app_name, app_dir):
+    user_home = get_user_home()
+    apps_dir = os.path.join(user_home, ".local", "share", "applications")
+    desktop_file = os.path.join(apps_dir, f"{app_name}.desktop")
+    
+    # Resolve executable and icon paths using dynamic search
+    resolved_bin = find_file_recursive(app_dir, app_name, is_executable=True)
+    resolved_icon = find_icon_recursive(app_dir, app_name)
+    
+    if not resolved_bin:
+        print(f"Warning: Executable binary '{app_name}' was not found inside {app_dir}. Skipping .desktop file creation.", file=sys.stderr)
+        return
+
+    # Use generic icon fallback if none is found
+    icon_path = resolved_icon if resolved_icon else "utilities-terminal"
+    
+    display_name = "Antigravity IDE" if app_name == "antigravity-ide" else "Antigravity"
+    comment = (
+        "Google Antigravity IDE"
+        if app_name == "antigravity-ide"
+        else "Google Antigravity Platform"
+    )
+
+    desktop_content = f"""[Desktop Entry]
+Name={display_name}
+Comment={comment}
+Exec={resolved_bin} %U
+Icon={icon_path}
+Terminal=false
+Type=Application
+Categories=Development;
+"""
+    try:
+        os.makedirs(apps_dir, exist_ok=True)
+        chown_to_user(apps_dir)
+        with open(desktop_file, 'w') as f:
+            f.write(desktop_content)
+        chown_to_user(desktop_file)
+        # Ensure executable bit is set on .desktop (often needed for launchers)
+        os.chmod(desktop_file, 0o755)
+    except OSError as e:
+        print(f"Warning: Failed to create desktop launcher file {desktop_file}: {e}", file=sys.stderr)
+
+# Main launch flow
+def main():
+    # Detect application type from argv[0]
+    basename = os.path.basename(sys.argv[0])
+    is_ide = "ide" in basename.lower()
+    app_name = "antigravity-ide" if is_ide else "antigravity"
+
+    # Handle --update flag
+    force_update = "--update" in sys.argv
+    
+    # Run self-installation (creates symlinks in ~/.local/bin)
+    self_install()
+
+    # Perform update check/install
+    check_and_update(app_name, force=force_update)
+
+    if force_update:
+        # Exit immediately if run only to update
+        print("Update operation completed.")
+        sys.exit(0)
+
+    # Locate executable binary to launch
+    user_home = get_user_home()
+    app_dir = os.path.join(user_home, ".local", "opt", app_name)
+    resolved_bin = find_file_recursive(app_dir, app_name, is_executable=True)
+    
+    if not resolved_bin:
+        print(f"Error: {app_name} is not installed and could not be loaded.", file=sys.stderr)
+        print("Please check internet connection and run again to install.", file=sys.stderr)
+        sys.exit(1)
+
+    # Launch the real binary, replacing the current process transparently
+    # Filter out --update flag if somehow present
+    exec_args = [resolved_bin] + [arg for arg in sys.argv[1:] if arg != "--update"]
+    
+    try:
+        os.execv(resolved_bin, exec_args)
+    except OSError as e:
+        print(f"Error: Failed to execute application: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
