@@ -15,6 +15,46 @@ Written in pure Python with zero external dependencies to ensure out-of-the-box 
 
 ---
 
+## Quality Assurance
+
+All QA tools must report zero issues before merging. Install them with:
+
+```bash
+pip install pylint pytype black
+```
+
+### Code Formatting
+
+```bash
+black --check antigravity tests/test_antigravity.py
+```
+
+To apply formatting automatically:
+
+```bash
+black antigravity tests/test_antigravity.py
+```
+
+### Linting
+
+```bash
+pylint antigravity tests/test_antigravity.py
+```
+
+### Type Checking
+
+```bash
+pytype antigravity
+```
+
+### Unit Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+---
+
 ## Installation
 
 ### 1. Bootstrap Setup
