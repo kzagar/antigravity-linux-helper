@@ -11,7 +11,7 @@ Written in pure Python with zero external dependencies to ensure out-of-the-box 
 - **Atomic Folder Swapping**: Package extraction is isolated under a temporary `.new` directory. The installation directory is updated atomically using file renames, ensuring your application is never left in a partially-downloaded or corrupt state.
 - **Dynamic Path Searching**: Searches recursively within the installed files to locate binaries and logo assets, resilient to any structural changes in future releases.
 - **Desktop Entry Integration**: Automatically generates `.desktop` shortcut files in `~/.local/share/applications/` so the applications immediately appear with high-quality icons in your desktop start menu (including the ChromeOS launcher).
-- **1-Hour Rate Limiting**: Caches update checks for one hour to guarantee sub-millisecond local launch times, while still checking for new versions regularly in the background.
+- **1-Hour Rate Limiting**: Caches update checks for one hour to guarantee instant launches; when the cache expires the update check runs synchronously before the app starts.
 
 ---
 
@@ -20,46 +20,29 @@ Written in pure Python with zero external dependencies to ensure out-of-the-box 
 All QA tools must report zero issues before merging. Install them with:
 
 ```bash
-pip install pylint pytype black
+uv sync --group dev
 ```
 
-### Code Formatting
-
 ```bash
-black --check antigravity tests/test_antigravity.py
-```
-
-To apply formatting automatically:
-
-```bash
-black antigravity tests/test_antigravity.py
-```
-
-### Linting
-
-```bash
-pylint antigravity tests/test_antigravity.py
-```
-
-### Type Checking
-
-```bash
-pytype antigravity
-```
-
-### Unit Tests
-
-```bash
-python -m unittest discover -s tests
+black --check antigravity tests/test_antigravity.py  # check formatting (use without --check to apply)
+pylint antigravity tests/test_antigravity.py          # lint
+pytype antigravity                                    # type-check
+python -m unittest discover -s tests                 # run tests
 ```
 
 ---
 
 ## Installation
 
-### 1. Bootstrap Setup
+### Option A — Direct install (no git required)
 
-Clone this repository and run the launcher script once with the `--update` flag. This will self-install the script to `~/.local/bin` and create the required symlinks:
+Download and run the script in one command. It will self-install to `~/.local/bin` and create the required symlinks:
+
+```bash
+curl -sSLo /tmp/antigravity https://raw.githubusercontent.com/kzagar/antigravity-linux-helper/refs/heads/main/antigravity && python3 /tmp/antigravity --update
+```
+
+### Option B — Clone and run
 
 ```bash
 git clone https://github.com/kzagar/antigravity-linux-helper.git

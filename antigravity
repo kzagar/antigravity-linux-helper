@@ -381,9 +381,10 @@ def _download_and_extract(
         req = urllib.request.Request(
             download_url, headers={"User-Agent": "Mozilla/5.0"}
         )
-        with urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as response, open(
-            temp_archive, "wb"
-        ) as out_file:
+        with (
+            urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT) as response,
+            open(temp_archive, "wb") as out_file,
+        ):
             raw_total = response.info().get("Content-Length")
             total_bytes = int(raw_total) if raw_total else None
             downloaded = 0

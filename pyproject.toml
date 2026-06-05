@@ -1,0 +1,14 @@
+[project]
+name = "antigravity-linux-helper"
+version = "0.1.0"
+requires-python = ">=3.9"
+
+[tool.black]
+target-version = ["py312"]
+
+[dependency-groups]
+dev = [
+    "black",
+    "pylint",
+    "pytype",
+]
