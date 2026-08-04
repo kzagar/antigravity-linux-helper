@@ -200,6 +200,42 @@ class TestFindIconRecursive(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: is_sandbox_configured
+# ---------------------------------------------------------------------------
+
+
+class TestIsSandboxConfigured(unittest.TestCase):
+    """Tests for chrome-sandbox permissions helper."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.root = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_returns_true_when_no_sandbox_binary(self):
+        """Returns True when chrome-sandbox is missing."""
+        self.assertTrue(ag.is_sandbox_configured(self.root))
+
+    def test_returns_false_when_not_root_or_not_setuid(self):
+        """Returns False when chrome-sandbox is owned by normal user or lacks setuid."""
+        sb = os.path.join(self.root, "chrome-sandbox")
+        _write(sb)
+        self.assertFalse(ag.is_sandbox_configured(self.root))
+
+    def test_returns_true_when_root_owned_and_setuid(self):
+        """Returns True when chrome-sandbox is root-owned with SUID set."""
+        sb = os.path.join(self.root, "chrome-sandbox")
+        _write(sb)
+        fake_stat = MagicMock()
+        fake_stat.st_uid = 0
+        fake_stat.st_mode = stat.S_ISUID | 0o755
+        with patch("os.stat", return_value=fake_stat):
+            self.assertTrue(ag.is_sandbox_configured(self.root))
+
+
+# ---------------------------------------------------------------------------
 # Tests: get_user_home / get_user_uid_gid
 # ---------------------------------------------------------------------------
 
@@ -372,6 +408,20 @@ class TestDiscoverDownloadUrl(unittest.TestCase):
         with patch.object(ag, "fetch_url", side_effect=OSError("network error")):
             with self.assertRaises(RuntimeError):
                 ag.discover_download_url("antigravity")
+
+    def test_html_direct_section_hub_and_ide(self):
+        """Discovers URLs directly embedded in HTML without JS bundles."""
+        mock_html_direct = (
+            "<html><body>"
+            f'<div id="antigravity-2"><a href="{HUB_LINUX_URL}">Download</a></div>'
+            f'<div id="antigravity-ide"><a href="{IDE_LINUX_URL}">Download</a></div>'
+            "</body></html>"
+        )
+        with self._patch_fetch(mock_html_direct, ""):
+            hub_url, _ = ag.discover_download_url("antigravity")
+            ide_url, _ = ag.discover_download_url("antigravity-ide")
+        self.assertEqual(hub_url, HUB_LINUX_URL)
+        self.assertEqual(ide_url, IDE_LINUX_URL)
 
 
 # ---------------------------------------------------------------------------

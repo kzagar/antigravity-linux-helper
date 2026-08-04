@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import sys
 import tarfile
 import urllib.request
@@ -136,6 +137,18 @@ def find_icon_recursive(dir_path, app_name):
     return None
 
 
+def is_sandbox_configured(app_dir):
+    """Check if chrome-sandbox under *app_dir* is owned by root with setuid (4755)."""
+    sandbox_path = find_file_recursive(app_dir, "chrome-sandbox")
+    if not sandbox_path:
+        return True
+    try:
+        st = os.stat(sandbox_path)
+        return st.st_uid == 0 and bool(st.st_mode & stat.S_ISUID)
+    except OSError:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # HTTP helper
 # ---------------------------------------------------------------------------
@@ -177,10 +190,11 @@ def discover_download_url(app_name):  # pylint: disable=too-many-locals
 
     Strategy
     --------
-    1. Fetch :data:`DOWNLOAD_PAGE_URL` and locate the ``main-*.js`` bundle.
-    2. Parse the JS bundle for the product's platforms section.
-    3. Extract the Linux href matching the host architecture.
-    4. Issue a HEAD request to obtain the ``Last-Modified`` timestamp.
+    1. Fetch :data:`DOWNLOAD_PAGE_URL`.
+    2. Check HTML for the product's platforms section.
+    3. If not in HTML, locate script bundles and search within them.
+    4. Extract the Linux href matching the host architecture.
+    5. Issue a HEAD request to obtain the ``Last-Modified`` timestamp.
 
     Returns
     -------
@@ -192,48 +206,54 @@ def discover_download_url(app_name):  # pylint: disable=too-many-locals
     except Exception as exc:
         raise RuntimeError(f"Failed to fetch download page: {exc}") from exc
 
-    # 2. Locate main JS bundle
-    js_files = re.findall(r'src="([^"]+/main-[^"]+\.js|main-[^"]+\.js)"', html)
-    if not js_files:
-        raise RuntimeError("Could not find main script bundle in download page HTML")
-
-    js_url = js_files[0]
-    if not js_url.startswith("http"):
-        js_url = BASE_URL + "/" + js_url.lstrip("/")
-
-    # 3. Fetch the JS bundle
-    try:
-        js_content = fetch_url(js_url)[0].decode("utf-8", errors="ignore")
-    except Exception as exc:
-        raise RuntimeError(f"Failed to fetch script bundle: {exc}") from exc
-
-    # 4. Find the product's platforms section and extract the Linux href.
-    #    The bundle embeds data shaped like:
-    #      {id:"antigravity-2", platforms:[{os:"linux", links:[{href:"https://...linux-x64..."}]}]}
     section_id = APP_SECTION_IDS[app_name]
     r_platform = get_linux_platform()
+    section_pat = re.compile(r'id[:=]["\']?' + re.escape(section_id) + r'["\']?')
 
-    section_pat = re.compile(r'id:"' + re.escape(section_id) + r'"')
-    section_match = section_pat.search(js_content)
-    if not section_match:
+    content = None
+
+    # 2. Check HTML for section first
+    if section_pat.search(html):
+        content = html
+    else:
+        # 3. Locate and search script bundles
+        js_files = re.findall(r'src=["\']([^"\']+\.js[^"\']*)["\']', html)
+        for js_path in js_files:
+            if js_path.startswith("http"):
+                js_url = js_path
+            else:
+                js_url = BASE_URL + "/" + js_path.lstrip("/")
+            try:
+                js_content = fetch_url(js_url)[0].decode("utf-8", errors="ignore")
+                if section_pat.search(js_content):
+                    content = js_content
+                    break
+            except Exception:  # pylint: disable=broad-exception-caught
+                continue
+
+    if content is None:
         raise RuntimeError(
-            f"Could not find download section '{section_id}' in JS bundle"
+            f"Could not find download section '{section_id}' in page HTML or JS bundles"
         )
 
-    # Bound the search window to this section only
+    # 4. Extract section window and Linux href
+    section_match = section_pat.search(content)
+    assert section_match is not None
+
     window_start = section_match.start()
-    next_section_pat = re.compile(r'id:"antigravity-')
-    next_match = next_section_pat.search(js_content, section_match.end())
+    next_section_pat = re.compile(r'id[:=]["\']?antigravity-')
+    next_match = next_section_pat.search(content, section_match.end())
     window_end = (
-        next_match.start()
-        if next_match
-        else min(window_start + 50_000, len(js_content))
+        next_match.start() if next_match else min(window_start + 50_000, len(content))
     )
-    window = js_content[window_start:window_end]
+    window = content[window_start:window_end]
 
     # Extract hrefs containing the target platform token
     hrefs = re.findall(
-        r'href:"(https?://[^"]+' + re.escape(r_platform) + r'[^"]+)"', window
+        r'href[:=]\s*["\']?(https?://[^"\'\s>]+'
+        + re.escape(r_platform)
+        + r'[^"\'\s>]+)["\']?',
+        window,
     )
     if not hrefs:
         raise RuntimeError(
@@ -681,6 +701,8 @@ def main():
     filtered_args = [
         a for a in sys.argv[1:] if a not in ("--update", "--no-notifications")
     ]
+    if not is_sandbox_configured(app_dir) and "--no-sandbox" not in filtered_args:
+        filtered_args.append("--no-sandbox")
     if no_notifications and shutil.which("dbus-run-session"):
         exec_bin = shutil.which("dbus-run-session")
         exec_args = [exec_bin, "--", resolved_bin] + filtered_args
