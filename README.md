@@ -11,7 +11,8 @@ Written in pure Python with zero external dependencies to ensure out-of-the-box 
 - **Atomic Folder Swapping**: Package extraction is isolated under a temporary `.new` directory. The installation directory is updated atomically using file renames, ensuring your application is never left in a partially-downloaded or corrupt state.
 - **Dynamic Path Searching**: Searches recursively within the installed files to locate binaries and logo assets, resilient to any structural changes in future releases.
 - **Desktop Entry Integration**: Automatically generates `.desktop` shortcut files in `~/.local/share/applications/` so the applications immediately appear with high-quality icons in your desktop start menu (including the ChromeOS launcher).
-- **1-Hour Rate Limiting**: Caches update checks for one hour to guarantee instant launches; when the cache expires the update check runs synchronously before the app starts.
+- **Self-Updating Launcher**: Automatically checks GitHub on startup for updates to this launcher script and restarts seamlessly when a newer version is available.
+- **1-Hour Rate Limiting**: Caches application update checks for one hour to guarantee instant launches; when the cache expires the update check runs synchronously before the app starts.
 
 ---
 

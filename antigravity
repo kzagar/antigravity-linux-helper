@@ -37,6 +37,13 @@ APP_SECTION_IDS = {
 # Maximum time (seconds) to wait for an archive download before giving up
 DOWNLOAD_TIMEOUT = 600
 
+# URL of the canonical repository script for self-updates
+SELF_UPDATE_URL = (
+    "https://raw.githubusercontent.com/kzagar/antigravity-linux-helper/"
+    "refs/heads/main/antigravity"
+)
+
+
 # ---------------------------------------------------------------------------
 # User / permission helpers
 # ---------------------------------------------------------------------------
@@ -276,8 +283,63 @@ def discover_download_url(app_name):  # pylint: disable=too-many-locals
 
 
 # ---------------------------------------------------------------------------
-# Self-installation
+# Self-update and self-installation
 # ---------------------------------------------------------------------------
+
+
+def self_update():
+    """Check if the remote script on GitHub differs from the running copy and re-exec."""
+    script_path = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
+    target_file = os.path.realpath(script_path)
+
+    if not os.path.isfile(target_file):
+        return
+
+    try:
+        with open(target_file, "rb") as fh:
+            local_data = fh.read()
+    except OSError as exc:
+        print(
+            f"Warning: Failed to read current script for self-update check: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        remote_data, _ = fetch_url(SELF_UPDATE_URL, timeout=10)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        print(
+            f"Warning: Failed to check for script self-update: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    if not remote_data or remote_data == local_data:
+        return
+
+    print("Updating antigravity launcher script to latest version from GitHub...")
+    tmp_file = target_file + ".tmp"
+    try:
+        with open(tmp_file, "wb") as fh:
+            fh.write(remote_data)
+        os.chmod(tmp_file, 0o755)
+        chown_to_user(tmp_file)
+        os.replace(tmp_file, target_file)
+    except OSError as exc:
+        print(f"Warning: Failed to write updated script: {exc}", file=sys.stderr)
+        if os.path.exists(tmp_file):
+            try:
+                os.remove(tmp_file)
+            except OSError:
+                pass
+        return
+
+    print("Script updated successfully. Restarting...")
+    try:
+        os.execv(sys.executable, [sys.executable, script_path] + sys.argv[1:])
+    except OSError as exc:
+        print(f"Error: Failed to re-exec updated script: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 def self_install():
@@ -662,6 +724,7 @@ def write_desktop_entry(app_name, app_dir):
 
 def main():
     """Detect the target app, check for updates, then exec the installed binary."""
+    self_update()
     is_ide = "ide" in os.path.basename(sys.argv[0]).lower()
     app_name = "antigravity-ide" if is_ide else "antigravity"
     force_update = "--update" in sys.argv

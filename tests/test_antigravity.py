@@ -567,5 +567,114 @@ class TestSelfInstall(unittest.TestCase):
         mock_copy.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Tests: self_update
+# ---------------------------------------------------------------------------
+
+
+class TestSelfUpdate(unittest.TestCase):
+    """Tests for the self-update logic."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.home = self._tmp.name
+        self.script_path = os.path.join(self.home, "antigravity")
+        _write(self.script_path, "#!/usr/bin/env python3\n# old version")
+        _make_executable(self.script_path)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_skips_when_remote_matches_local(self):
+        """When remote script matches local script, no write or re-exec happens."""
+        with patch.object(sys, "argv", [self.script_path]):
+            with patch.object(
+                ag,
+                "fetch_url",
+                return_value=(b"#!/usr/bin/env python3\n# old version", MagicMock()),
+            ):
+                with patch("os.execv") as mock_execv:
+                    ag.self_update()
+
+        mock_execv.assert_not_called()
+        with open(self.script_path, "r", encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "#!/usr/bin/env python3\n# old version")
+
+    def test_updates_file_and_reexecs_when_different(self):
+        """When remote script is different, updates file, sets +x, and re-execs."""
+        new_content = b"#!/usr/bin/env python3\n# new version\n"
+        with patch.object(sys, "argv", [self.script_path, "--arg1"]):
+            with patch.object(ag, "fetch_url", return_value=(new_content, MagicMock())):
+                with patch("os.execv") as mock_execv:
+                    ag.self_update()
+
+        with open(self.script_path, "rb") as fh:
+            self.assertEqual(fh.read(), new_content)
+        self.assertTrue(os.access(self.script_path, os.X_OK))
+
+        mock_execv.assert_called_once_with(
+            sys.executable, [sys.executable, self.script_path, "--arg1"]
+        )
+
+    def test_gracefully_handles_fetch_error(self):
+        """When fetching the remote script fails, it logs a warning and returns."""
+        with patch.object(sys, "argv", [self.script_path]):
+            with patch.object(ag, "fetch_url", side_effect=OSError("Network error")):
+                with patch("os.execv") as mock_execv:
+                    ag.self_update()
+
+        mock_execv.assert_not_called()
+        with open(self.script_path, "r", encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "#!/usr/bin/env python3\n# old version")
+
+    def test_gracefully_handles_write_error(self):
+        """When writing updated script fails, no re-exec is triggered."""
+        new_content = b"#!/usr/bin/env python3\n# new version\n"
+        with patch.object(sys, "argv", [self.script_path]):
+            with patch.object(ag, "fetch_url", return_value=(new_content, MagicMock())):
+                with patch("os.replace", side_effect=OSError("Permission denied")):
+                    with patch("os.execv") as mock_execv:
+                        ag.self_update()
+
+        mock_execv.assert_not_called()
+
+    def test_updates_target_of_symlink(self):
+        """When running via a symlink, the target file is updated."""
+        symlink_path = os.path.join(self.home, "antigravity-ide")
+        os.symlink(self.script_path, symlink_path)
+        new_content = b"#!/usr/bin/env python3\n# new version\n"
+
+        with patch.object(sys, "argv", [symlink_path]):
+            with patch.object(ag, "fetch_url", return_value=(new_content, MagicMock())):
+                with patch("os.execv") as mock_execv:
+                    ag.self_update()
+
+        self.assertTrue(os.path.islink(symlink_path))
+        with open(self.script_path, "rb") as fh:
+            self.assertEqual(fh.read(), new_content)
+        mock_execv.assert_called_once_with(
+            sys.executable, [sys.executable, symlink_path]
+        )
+
+    def test_skips_when_script_file_missing(self):
+        """When script path does not exist on disk, returns without error."""
+        non_existent = os.path.join(self.home, "non_existent")
+        with patch.object(sys, "argv", [non_existent]):
+            with patch.object(ag, "fetch_url") as mock_fetch:
+                ag.self_update()
+
+        mock_fetch.assert_not_called()
+
+    def test_main_invokes_self_update(self):
+        """main() invokes self_update() before other operations."""
+        with patch.object(ag, "self_update") as mock_self_update:
+            with patch.object(ag, "self_install"):
+                with patch.object(ag, "check_and_update"):
+                    with patch.object(sys, "argv", ["antigravity", "--update"]):
+                        with self.assertRaises(SystemExit):
+                            ag.main()
+        mock_self_update.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
