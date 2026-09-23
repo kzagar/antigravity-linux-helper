@@ -492,8 +492,11 @@ def _download_and_extract(
                     continue
                 safe_members.append(member)
             total_members = len(safe_members)
+            extract_kwargs = (
+                {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            )
             for i, member in enumerate(safe_members, 1):
-                tar.extract(member, path=new_dir)
+                tar.extract(member, path=new_dir, **extract_kwargs)
                 _render_progress_bar("Unpacking... ", i, total_members)
         print()
 
