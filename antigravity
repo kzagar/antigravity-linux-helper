@@ -1075,6 +1075,42 @@ def check_and_update(
 # ---------------------------------------------------------------------------
 
 
+def _cleanup_stale_user_desktop_file(app_name):
+    """Remove user-local .desktop file if its Exec path no longer exists."""
+    user_home = get_user_home()
+    user_desktop = os.path.join(
+        user_home, ".local", "share", "applications", f"{app_name}.desktop"
+    )
+    if not os.path.exists(user_desktop):
+        return
+    try:
+        with open(user_desktop, "r", encoding="utf-8") as ufh:
+            ucontent = ufh.read()
+        for line in ucontent.splitlines():
+            if line.startswith("Exec="):
+                exec_target = line.split("Exec=", 1)[1].split()[0]
+                if not os.path.exists(exec_target):
+                    os.remove(user_desktop)
+                break
+    except OSError:
+        pass
+
+
+def _update_desktop_database(apps_dir, privileged):
+    """Refresh the XDG desktop database cache if update-desktop-database is installed."""
+    if not shutil.which("update-desktop-database"):
+        return
+    try:
+        if privileged and os.getuid() != 0 and can_use_sudo():
+            subprocess.run(
+                ["sudo", "-n", "update-desktop-database", apps_dir], check=False
+            )
+        else:
+            subprocess.run(["update-desktop-database", apps_dir], check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def write_desktop_entry(
     app_name, app_dir, privileged=None
 ):  # pylint: disable=too-many-locals
@@ -1100,6 +1136,13 @@ def write_desktop_entry(
         else "Google Antigravity Platform"
     )
 
+    wm_class = "antigravity-ide" if app_name == "antigravity-ide" else "Antigravity"
+    mime_type = (
+        "text/plain;inode/directory;x-scheme-handler/antigravity;"
+        if app_name == "antigravity-ide"
+        else "x-scheme-handler/antigravity;"
+    )
+
     desktop_content = (
         f"[Desktop Entry]\n"
         f"Name={display_name}\n"
@@ -1108,6 +1151,8 @@ def write_desktop_entry(
         f"Icon={icon_path}\n"
         f"Terminal=false\n"
         f"Type=Application\n"
+        f"StartupWMClass={wm_class}\n"
+        f"MimeType={mime_type}\n"
         f"Categories=Development;\n"
     )
     try:
@@ -1139,6 +1184,11 @@ def write_desktop_entry(
             os.chmod(desktop_file, 0o755)
             if not paths["privileged"]:
                 chown_to_user(desktop_file)
+
+        if paths["privileged"]:
+            _cleanup_stale_user_desktop_file(app_name)
+
+        _update_desktop_database(apps_dir, paths["privileged"])
     except OSError as exc:
         print(
             f"Warning: Failed to create desktop launcher {desktop_file}: {exc}",
