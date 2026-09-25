@@ -112,15 +112,19 @@ def can_use_sudo():
         return False
 
 
+def is_user_mode_forced():
+    """Return True if user mode was explicitly requested via CLI flag or environment."""
+    env_mode = os.environ.get("ANTIGRAVITY_INSTALL_MODE", "").lower()
+    return "--user" in sys.argv or env_mode in ("user", "local")
+
+
 def is_privileged_mode():
     """Return True if installation should target system directories (/opt, /usr/local/bin)."""
-    env_mode = os.environ.get("ANTIGRAVITY_INSTALL_MODE", "").lower()
-    if env_mode in ("user", "local"):
+    if is_user_mode_forced():
         return False
+    env_mode = os.environ.get("ANTIGRAVITY_INSTALL_MODE", "").lower()
     if env_mode in ("system", "global", "opt"):
         return True
-    if "--user" in sys.argv:
-        return False
     if "--system" in sys.argv:
         return True
     return can_use_sudo()
@@ -188,20 +192,6 @@ def configure_chrome_sandbox(app_dir):
             )
 
 
-def resolve_app_dir(app_name):
-    """Return the installed application directory, checking /opt then ~/.local/opt."""
-    user_home = get_user_home()
-    candidates = [
-        os.path.join("/opt", app_name),
-        os.path.join(user_home, ".local", "opt", app_name),
-    ]
-    for c in candidates:
-        if find_file_recursive(c, app_name, is_executable=True):
-            return c
-    paths = get_install_paths()
-    return os.path.join(paths["opt_dir"], app_name)
-
-
 # ---------------------------------------------------------------------------
 # Filesystem search helpers
 # ---------------------------------------------------------------------------
@@ -254,6 +244,30 @@ def find_icon_recursive(dir_path, app_name):
     if candidates:
         return max(candidates)[1]
     return None
+
+
+def is_app_installed_in_opt(app_name):
+    """Return True if *app_name* is installed and executable under /opt."""
+    opt_app_dir = os.path.join("/opt", app_name)
+    return bool(find_file_recursive(opt_app_dir, app_name, is_executable=True))
+
+
+def resolve_app_dir(app_name):
+    """Return the installed application directory, checking /opt then ~/.local/opt."""
+    user_home = get_user_home()
+    user_opt_dir = os.path.join(user_home, ".local", "opt", app_name)
+    if is_user_mode_forced():
+        return user_opt_dir
+
+    candidates = [
+        os.path.join("/opt", app_name),
+        user_opt_dir,
+    ]
+    for c in candidates:
+        if find_file_recursive(c, app_name, is_executable=True):
+            return c
+    paths = get_install_paths()
+    return os.path.join(paths["opt_dir"], app_name)
 
 
 def is_sandbox_usable(app_dir):
@@ -520,6 +534,12 @@ def self_install(
 
     Skips gracefully when already running from the installed path.
     """
+    if not is_user_mode_forced() and os.getuid() != 0 and not can_use_sudo():
+        if is_app_installed_in_opt("antigravity") or is_app_installed_in_opt(
+            "antigravity-ide"
+        ):
+            return
+
     paths = get_install_paths(privileged)
     bin_dir = paths["bin_dir"]
     target_script = os.path.join(bin_dir, "antigravity")
@@ -842,6 +862,24 @@ def check_and_update(
     app_name, force=False, privileged=None
 ):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """Check for a newer version of *app_name* and install it atomically if found."""
+    # When running as a non-root user without sudo, if installed in /opt,
+    # skip updating and let main() launch the existing installation directly,
+    # unless --user was explicitly requested to override with ~/.local/opt.
+    if (
+        not is_user_mode_forced()
+        and is_app_installed_in_opt(app_name)
+        and os.getuid() != 0
+        and not can_use_sudo()
+    ):
+        if force:
+            print(
+                f"Error: Updating {app_name} in /opt requires root or sudo permissions. "
+                "Use --user to install a user-local version in ~/.local/opt.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return
+
     paths = get_install_paths(privileged)
     user_home = get_user_home()
     config_dir = os.path.join(user_home, ".config", "antigravity")

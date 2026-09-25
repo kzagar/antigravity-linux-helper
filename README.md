@@ -168,6 +168,8 @@ The script automatically selects between system-wide (`/opt`) and user-local (`~
   - IDE: `/usr/local/share/applications/antigravity-ide.desktop`
 
 ### User Mode (Used when `sudo` is not available or `--user` / `ANTIGRAVITY_INSTALL_MODE=user` is specified)
+- **Unprivileged `/opt` Execution**: When run as a user without `sudo` permissions, if the application is already installed in `/opt`, the helper simply launches `/opt/<app>` without trying to update or downloading duplicate files.
+- **User Mode Override**: If `--user` (or `ANTIGRAVITY_INSTALL_MODE=user`) is explicitly passed, it overrides any system `/opt` installation, allowing the user to install, update, and launch their own isolated copy in `~/.local/opt`.
 - **Executables & Symlinks**:
   - Script: `~/.local/bin/antigravity`
   - Symlink: `~/.local/bin/antigravity-ide` -> `antigravity`

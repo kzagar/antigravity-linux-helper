@@ -1205,6 +1205,7 @@ class TestPrivilegedMode(unittest.TestCase):
                 return_value={"privileged": True, "opt_dir": "/opt"},
             ),
             patch("os.getuid", return_value=1000),
+            patch.object(ag, "can_use_sudo", return_value=True),
             patch("subprocess.run", return_value=mock_proc) as mock_run,
         ):
             ag.check_and_update("antigravity-ide", force=True)
@@ -1212,6 +1213,53 @@ class TestPrivilegedMode(unittest.TestCase):
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd[0], "sudo")
             self.assertIn("--internal-update=antigravity-ide", cmd)
+
+    def test_check_and_update_skips_when_opt_installed_and_no_sudo(self):
+        """When installed in /opt and user has no sudo, update is skipped."""
+        with (
+            patch.object(ag, "is_app_installed_in_opt", return_value=True),
+            patch("os.getuid", return_value=1000),
+            patch.object(ag, "can_use_sudo", return_value=False),
+            patch.object(ag, "discover_download_url") as mock_discover,
+        ):
+            ag.check_and_update("antigravity")
+            mock_discover.assert_not_called()
+
+    def test_check_and_update_error_when_force_update_in_opt_and_no_sudo(self):
+        """When installed in /opt, user has no sudo, and force=True, exits with error."""
+        with (
+            patch.object(ag, "is_app_installed_in_opt", return_value=True),
+            patch("os.getuid", return_value=1000),
+            patch.object(ag, "can_use_sudo", return_value=False),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                ag.check_and_update("antigravity", force=True)
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_resolve_app_dir_user_override(self):
+        """Passing --user makes resolve_app_dir return ~/.local/opt even if /opt exists."""
+        with (
+            patch.object(sys, "argv", ["antigravity", "--user"]),
+            patch.object(ag, "get_user_home", return_value=self.home),
+            patch.object(
+                ag, "find_file_recursive", return_value="/opt/antigravity/antigravity"
+            ),
+        ):
+            self.assertEqual(
+                ag.resolve_app_dir("antigravity"),
+                os.path.join(self.home, ".local", "opt", "antigravity"),
+            )
+
+    def test_self_install_skips_when_opt_installed_and_no_sudo(self):
+        """When app is installed in /opt and user has no sudo, self_install skips."""
+        with (
+            patch.object(ag, "is_app_installed_in_opt", return_value=True),
+            patch("os.getuid", return_value=1000),
+            patch.object(ag, "can_use_sudo", return_value=False),
+            patch("shutil.copy2") as mock_copy,
+        ):
+            ag.self_install()
+            mock_copy.assert_not_called()
 
 
 if __name__ == "__main__":
