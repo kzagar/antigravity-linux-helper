@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import urllib.request
 
 # ---------------------------------------------------------------------------
@@ -432,7 +433,7 @@ def discover_download_url(app_name):  # pylint: disable=too-many-locals
 # ---------------------------------------------------------------------------
 
 
-def self_update():
+def self_update():  # pylint: disable=too-many-branches,too-many-statements
     """Check if the remote script on GitHub differs from the running copy and re-exec."""
     script_path = shutil.which(sys.argv[0]) or os.path.abspath(sys.argv[0])
     target_file = os.path.realpath(script_path)
@@ -463,6 +464,31 @@ def self_update():
         return
 
     print("Updating antigravity launcher script to latest version from GitHub...")
+
+    if not os.access(target_file, os.W_OK) and can_use_sudo():
+        with tempfile.NamedTemporaryFile(delete=False) as tf:
+            tf.write(remote_data)
+            tmp_file = tf.name
+        try:
+            os.chmod(tmp_file, 0o755)
+            res = subprocess.run(
+                ["sudo", "-n", "cp", tmp_file, target_file],
+                check=False,
+            )
+            if res.returncode == 0:
+                subprocess.run(["sudo", "-n", "chmod", "755", target_file], check=False)
+                print("Script updated successfully. Restarting...")
+                os.execv(sys.executable, [sys.executable, script_path] + sys.argv[1:])
+        except OSError as exc:
+            print(f"Warning: Failed to update script via sudo: {exc}", file=sys.stderr)
+        finally:
+            if os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
+        return
+
     tmp_file = target_file + ".tmp"
     try:
         with open(tmp_file, "wb") as fh:
@@ -487,7 +513,9 @@ def self_update():
         sys.exit(1)
 
 
-def self_install(privileged=None):
+def self_install(
+    privileged=None,
+):  # pylint: disable=too-many-branches,too-many-statements
     """Copy this script to target bin directory and create the IDE symlink.
 
     Skips gracefully when already running from the installed path.
@@ -498,23 +526,31 @@ def self_install(privileged=None):
     target_symlink = os.path.join(bin_dir, "antigravity-ide")
     curr_script = os.path.abspath(sys.argv[0])
 
-    # Nothing to do if we are already the installed copy
+    # Check if we are already running from the installed path
     if os.path.realpath(curr_script) == os.path.realpath(target_script):
-        if not os.path.exists(target_symlink):
-            try:
-                os.symlink("antigravity", target_symlink)
-            except OSError as exc:
-                print(
-                    f"Warning: Could not create symlink {target_symlink}: {exc}",
-                    file=sys.stderr,
-                )
+        if not os.path.lexists(target_symlink):
+            if paths["privileged"] and os.getuid() != 0 and can_use_sudo():
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "ln", "-sf", "antigravity", target_symlink],
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    print(
+                        f"Warning: Could not create symlink {target_symlink}: {exc}",
+                        file=sys.stderr,
+                    )
+            else:
+                try:
+                    os.symlink("antigravity", target_symlink)
+                except OSError as exc:
+                    print(
+                        f"Warning: Could not create symlink {target_symlink}: {exc}",
+                        file=sys.stderr,
+                    )
         return
 
-    os.makedirs(bin_dir, exist_ok=True)
-    if not paths["privileged"]:
-        chown_to_user(bin_dir)
-
-    # Copy only when missing or different
+    # Check if target_script already matches curr_script
     should_copy = True
     if os.path.exists(target_script):
         try:
@@ -522,6 +558,65 @@ def self_install(privileged=None):
                 should_copy = f1.read() != f2.read()
         except OSError:
             pass
+
+    if paths["privileged"] and os.getuid() != 0:
+        if can_use_sudo():
+            if should_copy:
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "mkdir", "-p", bin_dir],
+                        check=False,
+                    )
+                    res = subprocess.run(
+                        ["sudo", "-n", "cp", curr_script, target_script],
+                        check=False,
+                    )
+                    if res.returncode == 0:
+                        subprocess.run(
+                            ["sudo", "-n", "chmod", "755", target_script],
+                            check=False,
+                        )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    print(
+                        f"Warning: Could not self-install script to {target_script}: {exc}",
+                        file=sys.stderr,
+                    )
+            if not os.path.lexists(target_symlink):
+                try:
+                    subprocess.run(
+                        ["sudo", "-n", "ln", "-sf", "antigravity", target_symlink],
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    print(
+                        f"Warning: Could not create symlink {target_symlink}: {exc}",
+                        file=sys.stderr,
+                    )
+        else:
+            if should_copy:
+                try:
+                    os.makedirs(bin_dir, exist_ok=True)
+                    shutil.copy2(curr_script, target_script)
+                    os.chmod(target_script, 0o755)
+                except OSError as exc:
+                    print(
+                        f"Warning: Could not self-install script to {target_script}: {exc}",
+                        file=sys.stderr,
+                    )
+            if not os.path.lexists(target_symlink):
+                try:
+                    os.symlink("antigravity", target_symlink)
+                except OSError as exc:
+                    print(
+                        f"Warning: Could not create symlink {target_symlink}: {exc}",
+                        file=sys.stderr,
+                    )
+        return
+
+    # User-mode or running as root
+    os.makedirs(bin_dir, exist_ok=True)
+    if not paths["privileged"]:
+        chown_to_user(bin_dir)
 
     if should_copy:
         try:
@@ -535,7 +630,7 @@ def self_install(privileged=None):
                 file=sys.stderr,
             )
 
-    if not os.path.exists(target_symlink):
+    if not os.path.lexists(target_symlink):
         try:
             os.symlink("antigravity", target_symlink)
             if not paths["privileged"]:
@@ -849,7 +944,9 @@ def check_and_update(
 # ---------------------------------------------------------------------------
 
 
-def write_desktop_entry(app_name, app_dir, privileged=None):
+def write_desktop_entry(
+    app_name, app_dir, privileged=None
+):  # pylint: disable=too-many-locals
     """Write a ``.desktop`` launcher for *app_name*."""
     paths = get_install_paths(privileged)
     apps_dir = paths["apps_dir"]
@@ -883,14 +980,34 @@ def write_desktop_entry(app_name, app_dir, privileged=None):
         f"Categories=Development;\n"
     )
     try:
-        os.makedirs(apps_dir, exist_ok=True)
-        if not paths["privileged"]:
-            chown_to_user(apps_dir)
-        with open(desktop_file, "w", encoding="utf-8") as fh:
-            fh.write(desktop_content)
-        os.chmod(desktop_file, 0o755)
-        if not paths["privileged"]:
-            chown_to_user(desktop_file)
+        if paths["privileged"] and os.getuid() != 0 and can_use_sudo():
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
+                tf.write(desktop_content)
+                tmp_path = tf.name
+            try:
+                subprocess.run(["sudo", "-n", "mkdir", "-p", apps_dir], check=False)
+                res = subprocess.run(
+                    ["sudo", "-n", "cp", tmp_path, desktop_file], check=False
+                )
+                if res.returncode == 0:
+                    subprocess.run(
+                        ["sudo", "-n", "chmod", "755", desktop_file], check=False
+                    )
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+        else:
+            os.makedirs(apps_dir, exist_ok=True)
+            if not paths["privileged"]:
+                chown_to_user(apps_dir)
+            with open(desktop_file, "w", encoding="utf-8") as fh:
+                fh.write(desktop_content)
+            os.chmod(desktop_file, 0o755)
+            if not paths["privileged"]:
+                chown_to_user(desktop_file)
     except OSError as exc:
         print(
             f"Warning: Failed to create desktop launcher {desktop_file}: {exc}",

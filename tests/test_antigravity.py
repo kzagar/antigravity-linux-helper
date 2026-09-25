@@ -555,6 +555,24 @@ class TestWriteDesktopEntry(unittest.TestCase):
         icon_line = next(ln for ln in content.splitlines() if ln.startswith("Icon="))
         self.assertIn("utilities-terminal", icon_line)
 
+    def test_privileged_non_root_writes_desktop_with_sudo(self):
+        """When privileged mode is active and non-root, writes desktop entry via sudo."""
+        with patch.object(ag, "is_privileged_mode", return_value=True):
+            with patch.object(os, "getuid", return_value=1000):
+                with patch.object(ag, "can_use_sudo", return_value=True):
+                    with patch("subprocess.run") as mock_run:
+                        mock_run.return_value = MagicMock(returncode=0)
+                        ag.write_desktop_entry(
+                            "antigravity", self.app_dir, privileged=True
+                        )
+
+        sudo_calls = [
+            call_args[0][0]
+            for call_args in mock_run.call_args_list
+            if isinstance(call_args[0][0], list) and call_args[0][0][0] == "sudo"
+        ]
+        self.assertTrue(any("cp" in c for c in sudo_calls))
+
 
 # ---------------------------------------------------------------------------
 # Tests: self_install
@@ -604,6 +622,50 @@ class TestSelfInstall(unittest.TestCase):
                     ag.self_install()
 
         mock_copy.assert_not_called()
+
+    def test_privileged_non_root_uses_sudo(self):
+        """When privileged mode is on and non-root, uses sudo to install and link."""
+        src = os.path.join(self.home, "source_script")
+        _write(src, "#!/usr/bin/env python3\n# script")
+        _make_executable(src)
+
+        with patch.object(sys, "argv", [src]):
+            with patch.object(ag, "is_privileged_mode", return_value=True):
+                with patch.object(os, "getuid", return_value=1000):
+                    with patch.object(ag, "can_use_sudo", return_value=True):
+                        with patch.object(os.path, "lexists", return_value=False):
+                            with patch("subprocess.run") as mock_run:
+                                mock_run.return_value = MagicMock(returncode=0)
+                                ag.self_install(privileged=True)
+
+        # Should invoke sudo for mkdir, cp, chmod, and ln
+        self.assertTrue(mock_run.called)
+        sudo_calls = [
+            call_args[0][0]
+            for call_args in mock_run.call_args_list
+            if isinstance(call_args[0][0], list) and call_args[0][0][0] == "sudo"
+        ]
+        self.assertTrue(any("cp" in c for c in sudo_calls))
+        self.assertTrue(any("ln" in c for c in sudo_calls))
+
+    def test_privileged_already_installed_creates_symlink_with_sudo(self):
+        """When running from /usr/local/bin, missing symlink is created via sudo."""
+        target = "/usr/local/bin/antigravity"
+        with patch.object(sys, "argv", [target]):
+            with patch.object(ag, "is_privileged_mode", return_value=True):
+                with patch.object(os, "getuid", return_value=1000):
+                    with patch.object(ag, "can_use_sudo", return_value=True):
+                        with patch.object(os.path, "lexists", return_value=False):
+                            with patch("subprocess.run") as mock_run:
+                                mock_run.return_value = MagicMock(returncode=0)
+                                ag.self_install(privileged=True)
+
+        sudo_calls = [
+            call_args[0][0]
+            for call_args in mock_run.call_args_list
+            if isinstance(call_args[0][0], list) and call_args[0][0][0] == "sudo"
+        ]
+        self.assertTrue(any("ln" in c for c in sudo_calls))
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +765,26 @@ class TestSelfUpdate(unittest.TestCase):
                 ag.self_update()
 
         mock_fetch.assert_not_called()
+
+    def test_updates_via_sudo_when_not_writable(self):
+        """When script is not writable and sudo is available, updates via sudo."""
+        new_content = b"#!/usr/bin/env python3\n# new sudo version\n"
+        with patch.object(sys, "argv", [self.script_path]):
+            with patch.object(ag, "fetch_url", return_value=(new_content, MagicMock())):
+                with patch.object(os, "access", return_value=False):
+                    with patch.object(ag, "can_use_sudo", return_value=True):
+                        with patch("subprocess.run") as mock_run:
+                            mock_run.return_value = MagicMock(returncode=0)
+                            with patch("os.execv") as mock_execv:
+                                ag.self_update()
+
+        sudo_calls = [
+            call_args[0][0]
+            for call_args in mock_run.call_args_list
+            if isinstance(call_args[0][0], list) and call_args[0][0][0] == "sudo"
+        ]
+        self.assertTrue(any("cp" in c for c in sudo_calls))
+        mock_execv.assert_called_once()
 
     def test_main_invokes_self_update(self):
         """main() invokes self_update() before other operations."""
