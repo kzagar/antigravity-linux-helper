@@ -10,8 +10,10 @@ Written in pure Python with zero external dependencies to ensure out-of-the-box 
 - **Heuristics-Based Auto-Update**: Scraping heuristics dynamically scan the official download website to resolve the latest releases and construct download URLs for your machine's CPU architecture (`linux-x64` or `linux-arm`).
 - **Atomic Folder Swapping**: Package extraction is isolated under a temporary `.new` directory. The installation directory is updated atomically using file renames, ensuring your application is never left in a partially-downloaded or corrupt state.
 - **Dynamic Path Searching**: Searches recursively within the installed files to locate binaries and logo assets, resilient to any structural changes in future releases.
-- **Desktop Entry Integration**: Automatically generates `.desktop` shortcut files in `~/.local/share/applications/` so the applications immediately appear with high-quality icons in your desktop start menu (including the ChromeOS launcher).
+- **Desktop Entry Integration**: Automatically generates `.desktop` shortcut files in `~/.local/share/applications/` (or `/usr/local/share/applications/`) so the applications immediately appear with high-quality icons in your desktop start menu (including the ChromeOS launcher).
 - **Self-Updating Launcher**: Automatically checks GitHub on startup for updates to this launcher script and restarts seamlessly when a newer version is available.
+- **Privileged /opt Installation & SUID Sandbox**: When `sudo` can be used (or when run with `--system`), installs globally under `/opt/` and `/usr/local/bin/` and configures `chrome-sandbox` with root SUID (4755) permissions so Chromium's full security sandbox is active out-of-the-box.
+- **Keyring & Password Store Auto-Detection**: Automatically detects installed Linux desktop keyrings (`gnome-libsecret` for GNOME/libsecret/KeePassXC, `kwallet6`/`kwallet5`/`kwallet` for KDE, `basic` fallback) and configures runtime arguments (`argv.json` and `--password-store` CLI flag) to eliminate OS keyring encryption errors.
 - **1-Hour Rate Limiting**: Caches application update checks for one hour to guarantee instant launches; when the cache expires the update check runs synchronously before the app starts.
 
 ---
@@ -128,13 +130,44 @@ Exec=/home/<user>/.local/bin/antigravity %U
 ```
 
 > **Note:** The `.desktop` files are regenerated on every update check. You will need to re-apply this change after each update.
+ 
+### Password Store & Keyring Configuration
+
+The script automatically detects the installed keyring service on your system and configures both the application runtime (`~/.antigravity-ide/argv.json`) and the launch arguments (`--password-store=...`):
+- **GNOME / libsecret** (`gnome-libsecret`): Used when `gnome-keyring-daemon`, `secret-tool`, or `keepassxc` is detected, or when running under GNOME, XFCE, Cinnamon, MATE, Pantheon, or COSMIC.
+- **KDE Plasma** (`kwallet6` / `kwallet5` / `kwallet`): Used when running under KDE or when `kwalletd*` is present.
+- **Basic / Plaintext** (`basic`): Used as fallback in headless, containerized, or minimal window manager setups without a keyring daemon.
+
+You can override the detected password store at any time:
+
+**Via command line flag:**
+```bash
+antigravity-ide --password-store=basic
+```
+
+**Via environment variable:**
+```bash
+export ANTIGRAVITY_PASSWORD_STORE=gnome-libsecret
+```
 
 ---
 
 ## Internals & File Paths
 
-The script organizes itself inside the user's home directory space to prevent the need for `sudo`/root privileges:
+The script automatically selects between system-wide (`/opt`) and user-local (`~/.local`) installation paths based on privilege availability:
 
+### System-Wide Mode (Default when `sudo` is available or `--system` is used)
+- **Executables & Symlinks**:
+  - Script: `/usr/local/bin/antigravity`
+  - Symlink: `/usr/local/bin/antigravity-ide` -> `antigravity`
+- **Application Binaries & SUID Sandbox**:
+  - Hub: `/opt/antigravity/` (`/opt/antigravity/chrome-sandbox` with root SUID `4755`)
+  - IDE: `/opt/antigravity-ide/` (`/opt/antigravity-ide/chrome-sandbox` with root SUID `4755`)
+- **Desktop Launchers**:
+  - Hub: `/usr/local/share/applications/antigravity.desktop`
+  - IDE: `/usr/local/share/applications/antigravity-ide.desktop`
+
+### User Mode (Used when `sudo` is not available or `--user` / `ANTIGRAVITY_INSTALL_MODE=user` is specified)
 - **Executables & Symlinks**:
   - Script: `~/.local/bin/antigravity`
   - Symlink: `~/.local/bin/antigravity-ide` -> `antigravity`
@@ -144,6 +177,10 @@ The script organizes itself inside the user's home directory space to prevent th
 - **Desktop Launchers**:
   - Hub: `~/.local/share/applications/antigravity.desktop`
   - IDE: `~/.local/share/applications/antigravity-ide.desktop`
+
+### Configuration & Caches (Always in user home)
 - **Rate-Limiting Cache**:
   - Hub: `~/.config/antigravity/last_check_antigravity`
   - IDE: `~/.config/antigravity/last_check_antigravity-ide`
+- **Runtime Arguments**:
+  - IDE: `~/.antigravity-ide/argv.json`

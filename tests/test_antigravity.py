@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 """Unit tests for the antigravity launcher script.
 
 All network I/O is mocked so the suite runs fully offline.
@@ -205,7 +206,7 @@ class TestFindIconRecursive(unittest.TestCase):
 
 
 class TestIsSandboxConfigured(unittest.TestCase):
-    """Tests for chrome-sandbox permissions helper."""
+    """Tests for sandbox usability helper."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
@@ -214,15 +215,47 @@ class TestIsSandboxConfigured(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_returns_true_when_no_sandbox_binary(self):
-        """Returns True when chrome-sandbox is missing."""
-        self.assertTrue(ag.is_sandbox_configured(self.root))
+    def test_returns_true_when_no_sandbox_binary_and_userns_works(self):
+        """Returns True when chrome-sandbox is missing and user namespaces work."""
+        with (
+            patch("os.path.exists", return_value=False),
+            patch("os.fork", return_value=123),
+            patch("os.waitpid", return_value=(123, 0)),
+        ):
+            self.assertTrue(ag.is_sandbox_usable(self.root))
+
+    def test_returns_false_when_userns_clone_disabled_sysctl(self):
+        """Returns False when /proc/sys/kernel/unprivileged_userns_clone is 0."""
+        with (
+            patch(
+                "os.path.exists", side_effect=lambda p: "unprivileged_userns_clone" in p
+            ),
+            patch("builtins.open", unittest.mock.mock_open(read_data="0")),
+        ):
+            self.assertFalse(ag.is_sandbox_usable(self.root))
+
+    def test_returns_false_when_max_userns_zero_sysctl(self):
+        """Returns False when /proc/sys/user/max_user_namespaces is 0."""
+        with (
+            patch("os.path.exists", side_effect=lambda p: "max_user_namespaces" in p),
+            patch("builtins.open", unittest.mock.mock_open(read_data="0")),
+        ):
+            self.assertFalse(ag.is_sandbox_usable(self.root))
+
+    def test_returns_false_when_userns_unshare_fails(self):
+        """Returns False when unshare(CLONE_NEWUSER) fails."""
+        with (
+            patch("os.path.exists", return_value=False),
+            patch("os.fork", return_value=123),
+            patch("os.waitpid", return_value=(123, 1 << 8)),
+        ):
+            self.assertFalse(ag.is_sandbox_usable(self.root))
 
     def test_returns_false_when_not_root_or_not_setuid(self):
         """Returns False when chrome-sandbox is owned by normal user or lacks setuid."""
         sb = os.path.join(self.root, "chrome-sandbox")
         _write(sb)
-        self.assertFalse(ag.is_sandbox_configured(self.root))
+        self.assertFalse(ag.is_sandbox_usable(self.root))
 
     def test_returns_true_when_root_owned_and_setuid(self):
         """Returns True when chrome-sandbox is root-owned with SUID set."""
@@ -232,7 +265,7 @@ class TestIsSandboxConfigured(unittest.TestCase):
         fake_stat.st_uid = 0
         fake_stat.st_mode = stat.S_ISUID | 0o755
         with patch("os.stat", return_value=fake_stat):
-            self.assertTrue(ag.is_sandbox_configured(self.root))
+            self.assertTrue(ag.is_sandbox_usable(self.root))
 
 
 # ---------------------------------------------------------------------------
@@ -440,8 +473,11 @@ class TestWriteDesktopEntry(unittest.TestCase):
         _write(bin_path, "binary")
         _make_executable(bin_path)
         _write(os.path.join(self.app_dir, "logo.png"))
+        self._env_patch = patch.dict(os.environ, {"ANTIGRAVITY_INSTALL_MODE": "user"})
+        self._env_patch.start()
 
     def tearDown(self):
+        self._env_patch.stop()
         self._tmp.cleanup()
 
     def _write_entry(self, app_name: str = "antigravity") -> None:
@@ -531,8 +567,11 @@ class TestSelfInstall(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
         self.home = self._tmp.name
+        self._env_patch = patch.dict(os.environ, {"ANTIGRAVITY_INSTALL_MODE": "user"})
+        self._env_patch.start()
 
     def tearDown(self):
+        self._env_patch.stop()
         self._tmp.cleanup()
 
     def test_copies_script_and_creates_symlink(self):
@@ -674,6 +713,423 @@ class TestSelfUpdate(unittest.TestCase):
                         with self.assertRaises(SystemExit):
                             ag.main()
         mock_self_update.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: detect_password_store
+# ---------------------------------------------------------------------------
+
+
+class TestDetectPasswordStore(unittest.TestCase):
+    """Tests for the password-store detection logic."""
+
+    def test_env_override(self):
+        """ANTIGRAVITY_PASSWORD_STORE environment variable overrides detection."""
+        with patch.dict(os.environ, {"ANTIGRAVITY_PASSWORD_STORE": "custom-store"}):
+            self.assertEqual(ag.detect_password_store(), "custom-store")
+
+    def test_kde_with_kwalletd6(self):
+        """In KDE environment with kwalletd6 available, returns kwallet6."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}, clear=True),
+            patch(
+                "shutil.which",
+                side_effect=lambda cmd: (
+                    "/usr/bin/kwalletd6" if cmd == "kwalletd6" else None
+                ),
+            ),
+        ):
+            self.assertEqual(ag.detect_password_store(), "kwallet6")
+
+    def test_kde_with_kwalletd5(self):
+        """In KDE environment with kwalletd5 available, returns kwallet5."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}, clear=True),
+            patch(
+                "shutil.which",
+                side_effect=lambda cmd: (
+                    "/usr/bin/kwalletd5" if cmd == "kwalletd5" else None
+                ),
+            ),
+        ):
+            self.assertEqual(ag.detect_password_store(), "kwallet5")
+
+    def test_kde_with_kwalletd(self):
+        """In KDE environment with kwalletd available, returns kwallet."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}, clear=True),
+            patch(
+                "shutil.which",
+                side_effect=lambda cmd: (
+                    "/usr/bin/kwalletd" if cmd == "kwalletd" else None
+                ),
+            ),
+        ):
+            self.assertEqual(ag.detect_password_store(), "kwallet")
+
+    def test_kde_with_gnome_keyring(self):
+        """In KDE environment with gnome-keyring-daemon, returns gnome-libsecret."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}, clear=True),
+            patch(
+                "shutil.which",
+                side_effect=lambda cmd: (
+                    "/usr/bin/gnome-keyring-daemon"
+                    if cmd == "gnome-keyring-daemon"
+                    else None
+                ),
+            ),
+        ):
+            self.assertEqual(ag.detect_password_store(), "gnome-libsecret")
+
+    def test_kde_fallback_defaults_to_kwallet5(self):
+        """In KDE environment without detected binaries, returns kwallet5."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "KDE"}, clear=True),
+            patch("shutil.which", return_value=None),
+        ):
+            self.assertEqual(ag.detect_password_store(), "kwallet5")
+
+    def test_gnome_keyring_daemon_found(self):
+        """When gnome-keyring-daemon is present, returns gnome-libsecret."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "XFCE"}, clear=True),
+            patch(
+                "shutil.which",
+                side_effect=lambda cmd: (
+                    "/usr/bin/gnome-keyring-daemon"
+                    if cmd == "gnome-keyring-daemon"
+                    else None
+                ),
+            ),
+        ):
+            self.assertEqual(ag.detect_password_store(), "gnome-libsecret")
+
+    def test_secret_tool_found(self):
+        """When secret-tool is present, returns gnome-libsecret."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "awesome"}, clear=True),
+            patch(
+                "shutil.which",
+                side_effect=lambda cmd: (
+                    "/usr/bin/secret-tool" if cmd == "secret-tool" else None
+                ),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            self.assertEqual(ag.detect_password_store(), "gnome-libsecret")
+
+    def test_keepassxc_found(self):
+        """When keepassxc is present, returns gnome-libsecret."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "i3"}, clear=True),
+            patch(
+                "shutil.which",
+                side_effect=lambda cmd: (
+                    "/usr/bin/keepassxc" if cmd == "keepassxc" else None
+                ),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            self.assertEqual(ag.detect_password_store(), "gnome-libsecret")
+
+    def test_kwallet_found_on_other_desktop(self):
+        """When kwalletd6 is present on a non-KDE desktop, returns kwallet6."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "i3"}, clear=True),
+            patch(
+                "shutil.which",
+                side_effect=lambda cmd: (
+                    "/usr/bin/kwalletd6" if cmd == "kwalletd6" else None
+                ),
+            ),
+            patch("os.path.exists", return_value=False),
+        ):
+            self.assertEqual(ag.detect_password_store(), "kwallet6")
+
+    def test_gnome_desktop_without_binaries_fallback(self):
+        """On GNOME desktop without binaries detected, returns gnome-libsecret."""
+        with (
+            patch.dict(os.environ, {"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}, clear=True),
+            patch("shutil.which", return_value=None),
+            patch("os.path.exists", return_value=False),
+        ):
+            self.assertEqual(ag.detect_password_store(), "gnome-libsecret")
+
+    def test_unknown_desktop_without_binaries_fallback(self):
+        """On an unknown environment with no keyrings, returns basic."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("shutil.which", return_value=None),
+            patch("os.path.exists", return_value=False),
+        ):
+            self.assertEqual(ag.detect_password_store(), "basic")
+
+
+# ---------------------------------------------------------------------------
+# Tests: update_argv_json
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateArgvJson(unittest.TestCase):
+    """Tests for ~/.<app>/argv.json update helper."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.home = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_creates_new_argv_json_when_missing(self):
+        """Creates a new argv.json with password-store if file does not exist."""
+        with patch.object(ag, "get_user_home", return_value=self.home):
+            ag.update_argv_json("antigravity-ide", "gnome-libsecret")
+
+        argv_file = os.path.join(self.home, ".antigravity-ide", "argv.json")
+        self.assertTrue(os.path.exists(argv_file))
+        with open(argv_file, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        self.assertIn('"password-store": "gnome-libsecret"', content)
+
+    def test_inserts_into_existing_argv_json(self):
+        """Inserts password-store into existing argv.json containing other settings."""
+        argv_dir = os.path.join(self.home, ".antigravity-ide")
+        os.makedirs(argv_dir, exist_ok=True)
+        argv_file = os.path.join(argv_dir, "argv.json")
+        initial_content = '{\n\t// comment\n\t"enable-crash-reporter": true\n}'
+        with open(argv_file, "w", encoding="utf-8") as fh:
+            fh.write(initial_content)
+
+        with patch.object(ag, "get_user_home", return_value=self.home):
+            ag.update_argv_json("antigravity-ide", "gnome-libsecret")
+
+        with open(argv_file, "r", encoding="utf-8") as fh:
+            updated = fh.read()
+        self.assertIn('"enable-crash-reporter": true', updated)
+        self.assertIn('"password-store": "gnome-libsecret"', updated)
+
+    def test_does_not_modify_if_password_store_already_present(self):
+        """Leaves argv.json unchanged if password-store is already present."""
+        argv_dir = os.path.join(self.home, ".antigravity-ide")
+        os.makedirs(argv_dir, exist_ok=True)
+        argv_file = os.path.join(argv_dir, "argv.json")
+        initial_content = '{\n\t"password-store": "kwallet5"\n}'
+        with open(argv_file, "w", encoding="utf-8") as fh:
+            fh.write(initial_content)
+
+        with patch.object(ag, "get_user_home", return_value=self.home):
+            ag.update_argv_json("antigravity-ide", "gnome-libsecret")
+
+        with open(argv_file, "r", encoding="utf-8") as fh:
+            updated = fh.read()
+        self.assertEqual(initial_content, updated)
+
+
+# ---------------------------------------------------------------------------
+# Tests: main CLI password store integration
+# ---------------------------------------------------------------------------
+
+
+class TestMainPasswordStore(unittest.TestCase):
+    """Tests for password-store CLI argument injection in main()."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.home = self._tmp.name
+        self.app_dir = os.path.join(self.home, ".local", "opt", "antigravity-ide")
+        bin_path = os.path.join(self.app_dir, "antigravity-ide")
+        _write(bin_path, "binary")
+        _make_executable(bin_path)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_main_passes_detected_password_store(self):
+        """main() appends --password-store=<store> to exec_args."""
+        with (
+            patch.object(sys, "argv", ["antigravity-ide"]),
+            patch.object(ag, "get_user_home", return_value=self.home),
+            patch.object(ag, "self_update"),
+            patch.object(ag, "self_install"),
+            patch.object(ag, "check_and_update"),
+            patch.object(ag, "detect_password_store", return_value="gnome-libsecret"),
+            patch("os.execv") as mock_execv,
+        ):
+            ag.main()
+
+        mock_execv.assert_called_once()
+        exec_args = mock_execv.call_args[0][1]
+        self.assertIn("--password-store=gnome-libsecret", exec_args)
+
+    def test_main_respects_user_supplied_password_store(self):
+        """main() does not append duplicate flag if user already supplied --password-store."""
+        with (
+            patch.object(sys, "argv", ["antigravity-ide", "--password-store=basic"]),
+            patch.object(ag, "get_user_home", return_value=self.home),
+            patch.object(ag, "self_update"),
+            patch.object(ag, "self_install"),
+            patch.object(ag, "check_and_update"),
+            patch.object(ag, "detect_password_store", return_value="gnome-libsecret"),
+            patch("os.execv") as mock_execv,
+        ):
+            ag.main()
+
+        mock_execv.assert_called_once()
+        exec_args = mock_execv.call_args[0][1]
+        self.assertIn("--password-store=basic", exec_args)
+        self.assertNotIn("--password-store=gnome-libsecret", exec_args)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Privileged mode / system installation
+# ---------------------------------------------------------------------------
+
+
+class TestPrivilegedMode(unittest.TestCase):
+    """Tests for privileged / system-wide installation mode."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.home = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_can_use_sudo_as_root(self):
+        """When running as root (uid 0), can_use_sudo returns True."""
+        with patch("os.getuid", return_value=0):
+            self.assertTrue(ag.can_use_sudo())
+
+    def test_can_use_sudo_no_sudo_binary(self):
+        """When sudo is not installed, can_use_sudo returns False."""
+        with (
+            patch("os.getuid", return_value=1000),
+            patch("shutil.which", return_value=None),
+        ):
+            self.assertFalse(ag.can_use_sudo())
+
+    def test_can_use_sudo_cached_or_passwordless(self):
+        """When sudo -n true succeeds, can_use_sudo returns True."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch("os.getuid", return_value=1000),
+            patch("shutil.which", return_value="/usr/bin/sudo"),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            self.assertTrue(ag.can_use_sudo())
+
+    def test_can_use_sudo_fails_when_password_needed(self):
+        """When sudo -n true fails, can_use_sudo returns False."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        with (
+            patch("os.getuid", return_value=1000),
+            patch("shutil.which", return_value="/usr/bin/sudo"),
+            patch("subprocess.run", return_value=mock_proc),
+        ):
+            self.assertFalse(ag.can_use_sudo())
+
+    def test_is_privileged_mode_env_user(self):
+        """ANTIGRAVITY_INSTALL_MODE=user forces user mode."""
+        with patch.dict(os.environ, {"ANTIGRAVITY_INSTALL_MODE": "user"}):
+            self.assertFalse(ag.is_privileged_mode())
+
+    def test_is_privileged_mode_env_system(self):
+        """ANTIGRAVITY_INSTALL_MODE=system forces privileged mode."""
+        with patch.dict(os.environ, {"ANTIGRAVITY_INSTALL_MODE": "system"}):
+            self.assertTrue(ag.is_privileged_mode())
+
+    def test_is_privileged_mode_cli_user(self):
+        """Passing --user forces user mode."""
+        with (
+            patch.object(sys, "argv", ["antigravity", "--user"]),
+            patch.object(ag, "can_use_sudo", return_value=True),
+        ):
+            self.assertFalse(ag.is_privileged_mode())
+
+    def test_is_privileged_mode_cli_system(self):
+        """Passing --system forces privileged mode."""
+        with (
+            patch.object(sys, "argv", ["antigravity", "--system"]),
+            patch.object(ag, "can_use_sudo", return_value=False),
+        ):
+            self.assertTrue(ag.is_privileged_mode())
+
+    def test_get_install_paths_privileged(self):
+        """Privileged install paths target /opt and /usr/local."""
+        paths = ag.get_install_paths(privileged=True)
+        self.assertEqual(paths["opt_dir"], "/opt")
+        self.assertEqual(paths["bin_dir"], "/usr/local/bin")
+        self.assertEqual(paths["apps_dir"], "/usr/local/share/applications")
+        self.assertTrue(paths["privileged"])
+
+    def test_get_install_paths_user(self):
+        """User install paths target ~/.local directories."""
+        with patch.object(ag, "get_user_home", return_value=self.home):
+            paths = ag.get_install_paths(privileged=False)
+            self.assertEqual(paths["opt_dir"], os.path.join(self.home, ".local", "opt"))
+            self.assertEqual(paths["bin_dir"], os.path.join(self.home, ".local", "bin"))
+            self.assertFalse(paths["privileged"])
+
+    def test_configure_chrome_sandbox_sets_suid_when_root(self):
+        """configure_chrome_sandbox sets root ownership and 4755 when running as root."""
+        app_dir = os.path.join(self.home, "app")
+        sb_path = os.path.join(app_dir, "chrome-sandbox")
+        _write(sb_path, "sandbox")
+
+        with (
+            patch("os.getuid", return_value=0),
+            patch("os.chown") as mock_chown,
+            patch("os.chmod") as mock_chmod,
+        ):
+            ag.configure_chrome_sandbox(app_dir)
+            mock_chown.assert_called_once_with(sb_path, 0, 0)
+            mock_chmod.assert_called_once_with(sb_path, 0o4755)
+
+    def test_configure_chrome_sandbox_noop_when_not_root(self):
+        """configure_chrome_sandbox does nothing when not running as root."""
+        app_dir = os.path.join(self.home, "app")
+        sb_path = os.path.join(app_dir, "chrome-sandbox")
+        _write(sb_path, "sandbox")
+
+        with (
+            patch("os.getuid", return_value=1000),
+            patch("os.chmod") as mock_chmod,
+        ):
+            ag.configure_chrome_sandbox(app_dir)
+            mock_chmod.assert_not_called()
+
+    def test_resolve_app_dir_prefers_opt(self):
+        """resolve_app_dir returns /opt/<app> when executable is present there."""
+        with patch.object(
+            ag,
+            "find_file_recursive",
+            side_effect=lambda path, *args, **kwargs: (
+                "/opt/antigravity/antigravity" if "/opt" in path else None
+            ),
+        ):
+            self.assertEqual(ag.resolve_app_dir("antigravity"), "/opt/antigravity")
+
+    def test_check_and_update_delegates_to_sudo_when_privileged_and_not_root(self):
+        """check_and_update delegates update command to sudo when privileged and non-root."""
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        with (
+            patch.object(
+                ag,
+                "get_install_paths",
+                return_value={"privileged": True, "opt_dir": "/opt"},
+            ),
+            patch("os.getuid", return_value=1000),
+            patch("subprocess.run", return_value=mock_proc) as mock_run,
+        ):
+            ag.check_and_update("antigravity-ide", force=True)
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            self.assertEqual(cmd[0], "sudo")
+            self.assertIn("--internal-update=antigravity-ide", cmd)
 
 
 if __name__ == "__main__":
