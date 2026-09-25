@@ -548,12 +548,45 @@ class TestWriteDesktopEntry(unittest.TestCase):
         self.assertFalse(os.path.exists(desktop))
 
     def test_fallback_icon_when_none_found(self):
-        """Falls back to 'utilities-terminal' when no icon file exists."""
+        """Falls back to 'utilities-terminal' when no icon file exists and fetch fails."""
         os.remove(os.path.join(self.app_dir, "logo.png"))
-        self._write_entry()
+        with patch.object(ag, "fetch_url", side_effect=OSError("Offline")):
+            self._write_entry()
         content = self._read_desktop()
         icon_line = next(ln for ln in content.splitlines() if ln.startswith("Icon="))
         self.assertIn("utilities-terminal", icon_line)
+
+    def test_ensure_icon_downloads_brand_logo_when_missing(self):
+        """ensure_icon downloads brand logo when no icon is present in app_dir."""
+        with patch.object(ag, "get_user_home", return_value=self.home):
+            with tempfile.TemporaryDirectory() as empty_app_dir:
+                mock_png = b"\x89PNG\r\n\x1a\n"
+                with patch.object(
+                    ag, "fetch_url", return_value=(mock_png, MagicMock())
+                ):
+                    icon_path = ag.ensure_icon(
+                        "antigravity", empty_app_dir, privileged=False
+                    )
+                    self.assertTrue(os.path.isfile(icon_path))
+                    self.assertTrue(icon_path.endswith("antigravity.png"))
+
+    def test_ensure_icon_privileged_installs_with_sudo(self):
+        """ensure_icon uses sudo to install to /usr/local/share/pixmaps in privileged mode."""
+        with (
+            patch.object(ag, "is_privileged_mode", return_value=True),
+            patch("os.getuid", return_value=1000),
+            patch.object(ag, "can_use_sudo", return_value=True),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            ag.ensure_icon("antigravity-ide", self.app_dir, privileged=True)
+
+        sudo_calls = [
+            call_args[0][0]
+            for call_args in mock_run.call_args_list
+            if isinstance(call_args[0][0], list) and call_args[0][0][0] == "sudo"
+        ]
+        self.assertTrue(any("cp" in c and "pixmaps" in " ".join(c) for c in sudo_calls))
 
     def test_privileged_non_root_writes_desktop_with_sudo(self):
         """When privileged mode is active and non-root, writes desktop entry via sudo."""

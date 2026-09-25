@@ -131,7 +131,7 @@ def is_privileged_mode():
 
 
 def get_install_paths(privileged=None):
-    """Return dict of target paths (opt_dir, bin_dir, apps_dir) based on mode."""
+    """Return dict of target installation directories based on mode."""
     if privileged is None:
         privileged = is_privileged_mode()
     if privileged:
@@ -139,6 +139,8 @@ def get_install_paths(privileged=None):
             "opt_dir": "/opt",
             "bin_dir": "/usr/local/bin",
             "apps_dir": "/usr/local/share/applications",
+            "pixmaps_dir": "/usr/local/share/pixmaps",
+            "icons_dir": "/usr/local/share/icons/hicolor/512x512/apps",
             "privileged": True,
         }
     user_home = get_user_home()
@@ -146,6 +148,10 @@ def get_install_paths(privileged=None):
         "opt_dir": os.path.join(user_home, ".local", "opt"),
         "bin_dir": os.path.join(user_home, ".local", "bin"),
         "apps_dir": os.path.join(user_home, ".local", "share", "applications"),
+        "pixmaps_dir": os.path.join(user_home, ".local", "share", "pixmaps"),
+        "icons_dir": os.path.join(
+            user_home, ".local", "share", "icons", "hicolor", "512x512", "apps"
+        ),
         "privileged": False,
     }
 
@@ -218,10 +224,12 @@ def find_icon_recursive(dir_path, app_name):
     """Return the best-scored PNG/SVG icon found under *dir_path*.
 
     Scoring heuristic (higher wins):
-      ``code``     → +10
-      ``logo``     → +8
-      ``icon``     → +6
-      *app_name*   → +5
+      Path contains ``resources/linux`` or ``/linux/``  → +20
+      Filename contains ``code``                        → +10
+      Filename contains ``logo``                        → +8
+      Filename contains ``icon``                        → +6
+      Filename contains ``<app_name>``                  → +5
+      Path is under editor UI toolbar (``/out/vs/``, ``/out/media/``) → -10
 
     Returns ``None`` when no image file is found.
     """
@@ -230,20 +238,105 @@ def find_icon_recursive(dir_path, app_name):
         for name in files:
             if not name.lower().endswith((".png", ".svg")):
                 continue
-            lower = name.lower()
+            lower_name = name.lower()
+            lower_path = os.path.join(root, name).lower()
             score = 0
-            if "code" in lower:
+            if "resources/linux" in lower_path or "/linux/" in lower_path:
+                score += 20
+            if "code" in lower_name:
                 score += 10
-            if "logo" in lower:
+            if "logo" in lower_name:
                 score += 8
-            if "icon" in lower:
+            if "icon" in lower_name:
                 score += 6
-            if app_name in lower:
+            if app_name in lower_name:
                 score += 5
+            if "/out/vs/" in lower_path or "/out/media/" in lower_path:
+                score -= 10
             candidates.append((score, os.path.join(root, name)))
     if candidates:
         return max(candidates)[1]
     return None
+
+
+def _download_brand_logo(app_dir, privileged):
+    """Download the official brand logo into *app_dir* if missing."""
+    try:
+        logo_data, _ = fetch_url(BRAND_LOGO_URL, timeout=15)
+        if not logo_data:
+            return None
+        target_logo = os.path.join(app_dir, "logo.png")
+        if os.access(app_dir, os.W_OK) or (privileged and os.getuid() == 0):
+            with open(target_logo, "wb") as fh:
+                fh.write(logo_data)
+            os.chmod(target_logo, 0o644)
+            return target_logo
+        if privileged and os.getuid() != 0 and can_use_sudo():
+            with tempfile.NamedTemporaryFile("wb", delete=False) as tf:
+                tf.write(logo_data)
+                tmp_name = tf.name
+            try:
+                subprocess.run(["sudo", "-n", "cp", tmp_name, target_logo], check=False)
+                subprocess.run(["sudo", "-n", "chmod", "644", target_logo], check=False)
+                return target_logo
+            finally:
+                if os.path.exists(tmp_name):
+                    try:
+                        os.remove(tmp_name)
+                    except OSError:
+                        pass
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        print(f"Warning: Could not fetch brand icon: {exc}", file=sys.stderr)
+    return None
+
+
+def _install_icon_to_dir(icon_src, target_dir, icon_dest_name, privileged):
+    """Copy an icon file into *target_dir*, handling root/sudo permissions."""
+    if not target_dir:
+        return
+    dest_file = os.path.join(target_dir, icon_dest_name)
+    try:
+        if privileged and os.getuid() != 0 and can_use_sudo():
+            subprocess.run(["sudo", "-n", "mkdir", "-p", target_dir], check=False)
+            res = subprocess.run(["sudo", "-n", "cp", icon_src, dest_file], check=False)
+            if res.returncode == 0:
+                subprocess.run(["sudo", "-n", "chmod", "644", dest_file], check=False)
+        else:
+            os.makedirs(target_dir, exist_ok=True)
+            if not privileged:
+                chown_to_user(target_dir)
+            shutil.copy2(icon_src, dest_file)
+            os.chmod(dest_file, 0o644)
+            if not privileged:
+                chown_to_user(dest_file)
+    except OSError as exc:
+        print(f"Warning: Could not install icon to {dest_file}: {exc}", file=sys.stderr)
+
+
+def ensure_icon(app_name, app_dir, privileged=None):
+    """Ensure the application icon is resolved and installed into icon directories."""
+    paths = get_install_paths(privileged)
+    pixmaps_dir = paths.get("pixmaps_dir")
+    icons_dir = paths.get("icons_dir")
+
+    icon_src = find_icon_recursive(app_dir, app_name)
+    if not icon_src and app_name == "antigravity":
+        icon_src = _download_brand_logo(app_dir, paths["privileged"])
+
+    if not icon_src:
+        return "utilities-terminal"
+
+    ext = os.path.splitext(icon_src)[1].lower() or ".png"
+    icon_dest_name = f"{app_name}{ext}"
+
+    for target_dir in (pixmaps_dir, icons_dir):
+        _install_icon_to_dir(icon_src, target_dir, icon_dest_name, paths["privileged"])
+
+    if pixmaps_dir:
+        pixmap_file = os.path.join(pixmaps_dir, icon_dest_name)
+        if os.path.exists(pixmap_file):
+            return pixmap_file
+    return icon_src
 
 
 def is_app_installed_in_opt(app_name):
@@ -999,7 +1092,7 @@ def write_desktop_entry(
         )
         return
 
-    icon_path = find_icon_recursive(app_dir, app_name) or "utilities-terminal"
+    icon_path = ensure_icon(app_name, app_dir, privileged=paths["privileged"])
     display_name = "Antigravity IDE" if app_name == "antigravity-ide" else "Antigravity"
     comment = (
         "Google Antigravity IDE"
